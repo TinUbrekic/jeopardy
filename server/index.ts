@@ -39,7 +39,7 @@ type Message =
   | { type: 'game:start'; gameName?: string }
   | { type: 'round:set'; round: 1 | 2 | 3 }
   | { type: 'question:open'; questionId: string }
-  | { type: 'question:resolve'; questionId: string; teamId: string; points: number; correct: boolean; allowUnbuzzed?: boolean }
+  | { type: 'question:resolve'; questionId: string; teamId: string; points: number; correct: boolean }
   | { type: 'buzzer:open'; questionId: string }
   | { type: 'buzzer:press'; teamId: string }
   | { type: 'buzzer:close' }
@@ -79,7 +79,7 @@ function roomState(room: Room) {
     lockedOutTeamIds: room.lockedOutTeamIds,
     mediaByQuestion: room.mediaByQuestion,
     finalCategory: room.finalCategory,
-    finalPrompt: room.finalPrompt,
+    finalPrompt: room.finalRevealed ? room.finalPrompt : '',
     finalRevealed: room.finalRevealed,
     finalScoredTeamIds: room.finalScoredTeamIds,
     finalWinnerId: room.finalScoredTeamIds.length === room.teams.length && room.teams.length > 0
@@ -122,6 +122,15 @@ function clearQuestionTimer(room: Room) {
   if (room.timer) clearTimeout(room.timer)
   room.timer = undefined
   room.timerExpiresAt = null
+}
+
+function resetFinal(room: Room) {
+  room.finalCategory = 'Final Jeopardy'
+  room.finalPrompt = ''
+  room.finalRevealed = false
+  room.finalWagers = {}
+  room.finalAnswers = {}
+  room.finalScoredTeamIds = []
 }
 
 function expireQuestion(room: Room, questionId: string) {
@@ -313,7 +322,14 @@ server.on('connection', (socket) => {
       clients.set(clientId, { socket, role: message.role, teamId, roomCode: joinedRoom.code })
       if (message.role === 'host') joinedRoom.hostId = clientId
       persistRoom(joinedRoom)
-      send(socket, 'room:joined', { ...roomState(joinedRoom), teamId })
+      send(socket, 'room:joined', {
+        ...roomState(joinedRoom),
+        teamId,
+        ...(message.role === 'team' && teamId ? {
+          finalWager: joinedRoom.finalWagers[teamId],
+          finalAnswer: joinedRoom.finalAnswers[teamId],
+        } : {}),
+      })
       broadcast(joinedRoom, 'room:state', roomState(joinedRoom))
     }
 
@@ -349,12 +365,12 @@ server.on('connection', (socket) => {
       }
       client.socket.close()
     } else if (message.type === 'final:setup' && client.role === 'host') {
+      if (room.finalRevealed) {
+        send(client.socket, 'error', { message: 'The final question has already been revealed.' })
+        return
+      }
       room.finalCategory = message.category.trim() || 'Final Jeopardy'
       room.finalPrompt = message.prompt.trim()
-      room.finalRevealed = false
-      room.finalWagers = {}
-      room.finalAnswers = {}
-      room.finalScoredTeamIds = []
       persistRoom(room)
       broadcast(room, 'final:state', { category: room.finalCategory, prompt: '', revealed: false })
     } else if (message.type === 'final:wager' && client.role === 'team' && client.teamId) {
@@ -418,9 +434,15 @@ server.on('connection', (socket) => {
       room.gameName = board.name
       room.categories = board.categories
       room.questionSets = board.questionSets
+      clearQuestionTimer(room)
       room.activeQuestionId = null
       room.playedQuestionIds = []
       room.gameStarted = false
+      room.round = 1
+      room.buzzerOpen = false
+      room.buzzes = []
+      room.lockedOutTeamIds = []
+      resetFinal(room)
       persistRoom(room)
       broadcast(room, 'room:state', roomState(room))
       send(client.socket, 'board:loaded', { board })
@@ -445,6 +467,17 @@ server.on('connection', (socket) => {
       persistRoom(room)
     } else if (message.type === 'board:sync' && client.role === 'host') {
       const questionSets = sanitizeQuestionSets(message.questionSets)
+      if (message.boardId !== room.boardId) {
+        clearQuestionTimer(room)
+        room.gameStarted = false
+        room.round = 1
+        room.activeQuestionId = null
+        room.playedQuestionIds = []
+        room.buzzerOpen = false
+        room.buzzes = []
+        room.lockedOutTeamIds = []
+        resetFinal(room)
+      }
       room.boardId = message.boardId
       room.gameName = message.gameName
       room.categories = message.categories
@@ -499,12 +532,23 @@ server.on('connection', (socket) => {
       if (room.activeQuestionId !== message.questionId) return
       const team = room.teams.find((candidate) => candidate.id === message.teamId)
       if (!team || room.lockedOutTeamIds.includes(team.id)) return
-      if (!room.buzzes.some((buzz) => buzz.teamId === team.id) && !message.allowUnbuzzed) return
+      const roundQuestions = sanitizeQuestionSets(room.questionSets)[room.round]
+      const question = Array.isArray(roundQuestions)
+        ? roundQuestions.find((candidate: { id?: string }) => candidate?.id === message.questionId)
+        : undefined
+      const isBoost = question?.boost === true
+      if (isBoost) {
+        const maxWager = team.score > 0 ? team.score : 1000
+        if (!Number.isSafeInteger(message.points) || Math.abs(message.points) > maxWager || (message.correct ? message.points < 0 : message.points > 0)) {
+          send(client.socket, 'error', { message: `Boost wager must be a whole number between 0 and ${maxWager}.` })
+          return
+        }
+      } else if (!room.buzzes.some((buzz) => buzz.teamId === team.id)) return
       team.score += message.points
-      if (message.correct) {
+      if (message.correct || isBoost) {
         clearQuestionTimer(room)
         if (!room.playedQuestionIds.includes(message.questionId)) room.playedQuestionIds.push(message.questionId)
-        room.boardControlTeamId = message.teamId
+        if (message.correct) room.boardControlTeamId = message.teamId
         room.activeQuestionId = null
         room.buzzerOpen = false
         room.buzzes = []
@@ -514,6 +558,7 @@ server.on('connection', (socket) => {
         room.buzzes = []
         room.buzzerOpen = true
       }
+      persistRoom(room)
       broadcast(room, 'room:state', roomState(room))
     } else if (message.type === 'buzzer:open' && client.role === 'host') {
       if (room.activeQuestionId !== message.questionId) return

@@ -115,6 +115,7 @@ function App() {
   const [finalWagers, setFinalWagers] = useState<Record<string, string>>({})
   const [finalWager, setFinalWager] = useState('')
   const [finalWagerSaved, setFinalWagerSaved] = useState(false)
+  const [finalAnswerSaved, setFinalAnswerSaved] = useState(false)
   const [finalScoredTeamIds, setFinalScoredTeamIds] = useState<string[]>([])
   const [finalAnswers, setFinalAnswers] = useState<Record<string, string>>({})
   const [finalWinnerId, setFinalWinnerId] = useState<string | null>(null)
@@ -209,6 +210,10 @@ function App() {
           finalWinnerId?: string | null
           finalCategory?: string
           finalPrompt?: string
+          finalWager?: number
+          finalAnswer?: string
+          finalRevealed?: boolean
+          finalScoredTeamIds?: string[]
           boards?: SavedBoard[]
           board?: { id: string; name: string; categories: Category[]; questionSets: Record<number, Question[]> }
         }
@@ -218,6 +223,12 @@ function App() {
         if (message.payload.teams) setTeams(message.payload.teams)
         if (message.payload.gameName) setGameName(message.payload.gameName)
         if (message.payload.boardId) boardIdRef.current = message.payload.boardId
+        if (route.role === 'team') {
+          setFinalWager(message.payload.finalWager === undefined ? '' : String(message.payload.finalWager))
+          setFinalWagerSaved(message.payload.finalWager !== undefined)
+          setFinalAnswer(message.payload.finalAnswer ?? '')
+          setFinalAnswerSaved(message.payload.finalAnswer !== undefined)
+        }
         if (message.payload.categories?.length) setCategories(message.payload.categories)
         if (message.payload.questionSets && Object.keys(message.payload.questionSets).length) setQuestionSets(completeQuestionSets(message.payload.questionSets, message.payload.categories?.length ? message.payload.categories : categories))
         if (message.type === 'room:created' && route.role === 'host') {
@@ -234,7 +245,7 @@ function App() {
       }
       if (message.type === 'final:state') {
         if (message.payload.category) setFinalCategory(message.payload.category)
-        if (message.payload.prompt !== undefined) setFinalPrompt(message.payload.prompt)
+        if (message.payload.prompt !== undefined && (route.role !== 'host' || message.payload.revealed)) setFinalPrompt(message.payload.prompt)
         if (message.payload.revealed !== undefined) setFinalRevealed(message.payload.revealed)
       }
       if (message.type === 'final:wagers' && message.payload.wagers) {
@@ -245,6 +256,7 @@ function App() {
         setFinalWager(String(message.payload.amount ?? 0))
         setFinalWagerSaved(true)
       }
+      if (message.type === 'final:answer:saved') setFinalAnswerSaved(true)
       if (message.type === 'final:score' && message.payload.teamId) {
         setFinalScoredTeamIds((current) => [...new Set([...current, message.payload.teamId as string])])
         if (message.payload.complete) setFinalWinnerId(message.payload.winner ?? null)
@@ -255,6 +267,11 @@ function App() {
         setActiveQuestion(null)
         setFinalWinnerId(null)
         setFinalScoredTeamIds([])
+        setFinalWagers({})
+        setFinalAnswers({})
+        setFinalCategory('Final Jeopardy')
+        setFinalPrompt('')
+        setFinalAnswer('')
         navigate('/')
       }
       if (message.type === 'board:loaded' && message.payload.board) {
@@ -267,6 +284,11 @@ function App() {
         setActiveQuestion(null)
         setFinalWinnerId(null)
         setFinalScoredTeamIds([])
+        setFinalWagers({})
+        setFinalAnswers({})
+        setFinalCategory('Final Jeopardy')
+        setFinalPrompt('')
+        setFinalAnswer('')
         setShowSavedBoards(false)
       }
       if (message.type === 'error') {
@@ -285,8 +307,10 @@ function App() {
         if (message.payload.lockedOutTeamIds) setLockedOutTeamIds(message.payload.lockedOutTeamIds)
         if (message.payload.firstBuzz !== undefined) setBuzzedTeamId(message.payload.firstBuzz?.teamId ?? null)
         if (message.payload.finalWinnerId !== undefined) setFinalWinnerId(message.payload.finalWinnerId)
-        if (message.payload.finalCategory !== undefined) setFinalCategory(message.payload.finalCategory)
-        if (message.payload.finalPrompt !== undefined) setFinalPrompt(message.payload.finalPrompt)
+        if (message.payload.finalRevealed !== undefined) setFinalRevealed(message.payload.finalRevealed)
+        if (message.payload.finalScoredTeamIds) setFinalScoredTeamIds(message.payload.finalScoredTeamIds)
+        if (route.role !== 'host' && message.payload.finalCategory !== undefined) setFinalCategory(message.payload.finalCategory)
+        if (route.role !== 'host' && message.payload.finalPrompt !== undefined) setFinalPrompt(message.payload.finalPrompt)
         if (message.payload.mediaByQuestion) {
           setQuestionSets((current) => Object.fromEntries(
             Object.entries(current).map(([setRound, setQuestions]) => [
@@ -298,7 +322,15 @@ function App() {
             ]),
           ))
         }
-        if (message.payload.boardId) boardIdRef.current = message.payload.boardId
+        if (message.payload.boardId) {
+          if (route.role === 'team' && boardIdRef.current !== message.payload.boardId) {
+            setFinalWager('')
+            setFinalWagerSaved(false)
+            setFinalAnswer('')
+            setFinalAnswerSaved(false)
+          }
+          boardIdRef.current = message.payload.boardId
+        }
         if (message.payload.categories?.length) setCategories(message.payload.categories)
         if (message.payload.questionSets && Object.keys(message.payload.questionSets).length) setQuestionSets(completeQuestionSets(message.payload.questionSets, message.payload.categories?.length ? message.payload.categories : categories))
         if (message.payload.playedQuestionIds) {
@@ -361,6 +393,7 @@ function App() {
 
   function openQuestion(question: Question) {
     if (question.played) return
+    setRoomError('')
     setActiveQuestion(question)
     setBuzzerOpen(false)
     setTimerExpiresAt(null)
@@ -405,9 +438,14 @@ function App() {
     if (!activeQuestion) return
     const teamId = activeQuestion.boost ? selectedTeamId : buzzedTeamId
     if (!teamId) return
-    const selectedTeam = teams.find((team) => team.id === teamId)
+    const selectedTeam = teams.find((team) => String(team.id) === String(teamId))
     const maxWager = selectedTeam && selectedTeam.score > 0 ? selectedTeam.score : 1000
-    const pointsWager = activeQuestion.boost ? Math.min(Math.max(Number(wager) || 0, 0), maxWager) : activeQuestion.value
+    const pointsWager = activeQuestion.boost ? Number(wager) : activeQuestion.value
+    if (activeQuestion.boost && (!selectedTeam || !wager.trim() || !Number.isSafeInteger(pointsWager) || pointsWager < 0 || pointsWager > maxWager)) {
+      setRoomError(`Enter a whole-number wager from 0 to ${maxWager.toLocaleString()}.`)
+      return
+    }
+    setRoomError('')
     const points = answeredCorrectly ? pointsWager : -pointsWager
 
     socketRef.current?.send(JSON.stringify({
@@ -416,21 +454,7 @@ function App() {
       teamId: String(teamId),
       points,
       correct: answeredCorrectly,
-      allowUnbuzzed: activeQuestion.boost,
     }))
-    if (!answeredCorrectly && !activeQuestion.boost) {
-      setBuzzedTeamId(null)
-      return
-    }
-    if (answeredCorrectly || activeQuestion.boost) {
-      setQuestionSets((current) => ({
-        ...current,
-        [round]: current[round].map((question) =>
-          question.id === activeQuestion.id ? { ...question, played: true } : question,
-        ),
-      }))
-      setActiveQuestion(null)
-    }
   }
 
   function addTeam() {
@@ -510,6 +534,11 @@ function App() {
     setRound(1)
     setFinalWinnerId(null)
     setFinalScoredTeamIds([])
+    setFinalWagers({})
+    setFinalAnswers({})
+    setFinalCategory('Final Jeopardy')
+    setFinalPrompt('')
+    setFinalAnswer('')
     syncBoard(nextCategories, nextQuestionSets, 'New Jeopardy Game')
     setShowSavedBoards(false)
     socketRef.current?.send(JSON.stringify({ type: 'board:list' }))
@@ -546,14 +575,21 @@ function App() {
   }
 
   function submitFinalWager() {
-    const amount = Math.max(Number(finalWager) || 0, 0)
+    const amount = Number(finalWager)
+    const maxWager = selectedTeam.score > 0 ? selectedTeam.score : 1000
+    if (!finalWager.trim() || !Number.isSafeInteger(amount) || amount < 0 || amount > maxWager) {
+      setRoomError(`Enter a whole-number wager from 0 to ${maxWager.toLocaleString()}.`)
+      return
+    }
+    setRoomError('')
     socketRef.current?.send(JSON.stringify({ type: 'final:wager', amount }))
     setFinalWagerSaved(false)
   }
 
   function submitFinalAnswer() {
+    setRoomError('')
+    setFinalAnswerSaved(false)
     socketRef.current?.send(JSON.stringify({ type: 'final:answer', answer: finalAnswer }))
-    setFinalAnswer('')
   }
 
   function updateCategory(categoryId: number, name: string) {
@@ -643,6 +679,9 @@ function App() {
       {connectionMessage && route.role !== 'entry' && route.role !== 'join' && (
         <div className="connection-banner" role="status">{connectionMessage}</div>
       )}
+      {roomError && !activeQuestion && (route.role === 'host' || route.role === 'team' || route.role === 'board') && (
+        <div className="room-error" role="alert">{roomError}</div>
+      )}
 
       <div className="content">
         {route.role === 'entry' ? (
@@ -725,17 +764,6 @@ function App() {
                     ? <img className="question-media" src={mediaSource(activeQuestion.media.url)} alt="Question media" />
                     : <video className="question-media" src={mediaSource(activeQuestion.media.url)} controls />
                 )}
-                {round === 3 && (
-                  <div className="team-question">
-                    <strong>Final Jeopardy</strong>
-                    {finalRevealed ? <div>{finalPrompt}</div> : <div>Wait for the host to reveal the final question.</div>}
-                    <input type="number" min="0" value={finalWager} onChange={(event) => setFinalWager(event.target.value)} placeholder="Your wager" disabled={finalRevealed} />
-                    <button className="team-buzzer" onClick={submitFinalWager} disabled={finalRevealed}>Submit wager</button>
-                    <input value={finalAnswer} onChange={(event) => setFinalAnswer(event.target.value)} placeholder="Your answer" disabled={!finalRevealed} />
-                    <button className="team-buzzer" onClick={submitFinalAnswer} disabled={!finalRevealed || !finalAnswer.trim()}>Submit answer</button>
-                    {finalWagerSaved && <small>Wager submitted privately.</small>}
-                  </div>
-                )}
                 {buzzerOpen && <div className="question-timer">{remainingSeconds}s</div>}
               </section>
             )}
@@ -785,6 +813,27 @@ function App() {
                       <h2>{String(selectedTeam.id) === finalWinnerId ? 'You won!' : `${teams.find((team) => String(team.id) === finalWinnerId)?.name ?? 'Another team'} won`}</h2>
                       <p>Final standings are shown on the board.</p>
                       <button className="join-button" onClick={() => navigate('/')}>Return to lobby</button>
+                    </div>
+                  ) : round === 3 ? (
+                    <div className="team-question">
+                      <strong>Final Jeopardy · {finalCategory}</strong>
+                      {finalRevealed ? (
+                        <>
+                          <p>{finalPrompt}</p>
+                          <label className="join-label" htmlFor="team-final-answer">Your answer</label>
+                          <input id="team-final-answer" className="join-input" value={finalAnswer} onChange={(event) => { setFinalAnswer(event.target.value); setFinalAnswerSaved(false) }} placeholder="Your answer" />
+                          <button className="join-button" onClick={submitFinalAnswer} disabled={!finalAnswer.trim()}>Submit answer</button>
+                          {finalAnswerSaved && <small>Answer submitted privately.</small>}
+                        </>
+                      ) : (
+                        <>
+                          <p>Submit your wager before the host reveals the question.</p>
+                          <label className="join-label" htmlFor="team-final-wager">Your wager (max {(selectedTeam.score > 0 ? selectedTeam.score : 1000).toLocaleString()} points)</label>
+                          <input id="team-final-wager" className="join-input" type="number" min="0" max={selectedTeam.score > 0 ? selectedTeam.score : 1000} step="1" value={finalWager} onChange={(event) => { setFinalWager(event.target.value); setFinalWagerSaved(false) }} placeholder="Your wager" />
+                          <button className="join-button" onClick={submitFinalWager}>Submit wager</button>
+                          {finalWagerSaved && <small>Wager submitted privately.</small>}
+                        </>
+                      )}
                     </div>
                   ) : (
                     <>
@@ -875,8 +924,8 @@ function App() {
               <label className="join-label" htmlFor="final-answer">Answer</label>
               <input id="final-answer" className="join-input" value={finalAnswer} onChange={(event) => setFinalAnswer(event.target.value)} placeholder="Host-only answer" />
               <div className="final-category-preview"><span className="eyebrow">CATEGORY REVEAL</span><strong>{finalCategory}</strong></div>
-              <button className="secondary-button" onClick={saveFinalSetup}>Save final setup</button>
-              <button className="primary-button reveal-final" onClick={revealFinalQuestion}>{finalRevealed ? 'Question revealed' : 'Reveal final question'}</button>
+              <button className="secondary-button" onClick={saveFinalSetup} disabled={finalRevealed}>Save final setup</button>
+              <button className="primary-button reveal-final" onClick={revealFinalQuestion} disabled={finalRevealed}>{finalRevealed ? 'Question revealed' : 'Reveal final question'}</button>
               {finalRevealed && <div className="answer-preview final-answer">Host answer: {finalAnswer || 'Not entered'}</div>}
             </section>
             <section className="board-panel">
@@ -885,7 +934,7 @@ function App() {
                 {teams.map((team) => (
                   <div className="final-wager-row" key={team.id}>
                     <div className="team-avatar" style={{ backgroundColor: team.color }}>{team.name.charAt(0)}</div>
-                    <strong>{team.name}<small>Max {Math.max(team.score, 0).toLocaleString()} pts{finalAnswers[String(team.id)] ? ` · ${finalAnswers[String(team.id)]}` : ''}</small></strong>
+                    <strong>{team.name}<small>Max {(team.score > 0 ? team.score : 1000).toLocaleString()} pts{finalAnswers[String(team.id)] ? ` · ${finalAnswers[String(team.id)]}` : ''}</small></strong>
                     <input type="number" readOnly placeholder="Wager" value={finalWagers[String(team.id)] ?? ''} />
                     <button className="final-correct" disabled={finalScoredTeamIds.includes(String(team.id))} onClick={() => scoreFinal(team.id, true)}>✓</button>
                     <button className="final-wrong" disabled={finalScoredTeamIds.includes(String(team.id))} onClick={() => scoreFinal(team.id, false)}>✕</button>
@@ -1054,7 +1103,7 @@ function App() {
             {activeQuestion.boost ? (
               <div className="team-select">
                 <label htmlFor="team-select">Which team selected this boost?</label>
-                <select id="team-select" value={selectedTeamId ?? ''} onChange={(event) => setSelectedTeamId(Number(event.target.value))}>
+                <select id="team-select" value={selectedTeamId ?? ''} onChange={(event) => setSelectedTeamId(event.target.value)}>
                   <option value="" disabled>Select a team</option>
                   {teams.map((team) => {
                     const maxWager = team.score > 0 ? team.score : 1000
@@ -1066,7 +1115,7 @@ function App() {
                     className="wager-input"
                     type="number"
                     min="0"
-                    max={(teams.find((team) => team.id === selectedTeamId)?.score ?? 0) > 0 ? teams.find((team) => team.id === selectedTeamId)?.score : 1000}
+                    max={(teams.find((team) => String(team.id) === String(selectedTeamId))?.score ?? 0) > 0 ? teams.find((team) => String(team.id) === String(selectedTeamId))?.score : 1000}
                     value={wager}
                     onChange={(event) => setWager(event.target.value)}
                     placeholder="Enter wager"
@@ -1086,6 +1135,7 @@ function App() {
                 )}
               </div>
             )}
+            {roomError && <div className="room-error" role="alert">{roomError}</div>}
             <div className="modal-actions">
               <button className="wrong-button" disabled={!buzzedTeamId && !selectedTeamId} onClick={() => markQuestion(false)}>✕ Incorrect</button>
               <button className="correct-button" disabled={!buzzedTeamId && !selectedTeamId} onClick={() => markQuestion(true)}>✓ Correct</button>
