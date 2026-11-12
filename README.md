@@ -1,4 +1,4 @@
-# Jeopardy+
+# Jeopardy
 
 ## Run locally
 
